@@ -74,8 +74,12 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': env('POSTGRES_DB', default='ledger_wallet'),
+        'USER': env('POSTGRES_USER', default='wallet_dev'),
+        'PASSWORD': env('POSTGRES_PASSWORD'),
+        'HOST': env('POSTGRES_HOST', default='127.0.0.1'),
+        'PORT': env.int('POSTGRES_PORT', default=5432),
     }
 }
 
@@ -123,9 +127,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
 # --- DRF ---
-# NOTE: AllowAny عمداً به‌عنوان permission پیش‌فرض انتخاب شده.
-# طبق فرض هماهنگ‌شده با شرکت، auth واقعی خارج از scope این ارزیابیه.
-# این تصمیم آگاهانه‌ست، نه سهل‌انگاری در امنیت.
+# Wallet API authentication is omitted as a local evaluation simplification.
+# This is an implementation decision, not an assumption approved by the company.
+# AllowAny permits unauthenticated requests and does not enforce wallet ownership.
 REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.AllowAny",
