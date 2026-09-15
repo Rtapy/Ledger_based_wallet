@@ -252,12 +252,16 @@ class LedgerEntryModelTests(TestCase):
         self.assertTrue(Wallet.objects.filter(pk=self.wallet.pk).exists())
         self.assertTrue(LedgerEntry.objects.filter(pk=entry.pk).exists())
 
-    def test_entries_are_returned_in_ascending_id_order(self):
-        # Explicit IDs make insertion order differ from the history contract.
+    def test_entries_are_ordered_by_newest_created_at_then_highest_id(self):
+        # Equal timestamps verify ID is the deterministic tie-breaker.
         # Row fixtures intentionally do not represent a complete wallet history.
         third = self._make_entry(id=300)
         first = self._make_entry(id=100)
         second = self._make_entry(id=200)
+        timestamp = third.created_at
+        LedgerEntry.objects.filter(pk__in=[first.pk, second.pk]).update(
+            created_at=timestamp
+        )
         history = self.wallet.entries.all()
         self.assertTrue(history.ordered)
-        self.assertEqual(list(history), [first, second, third])
+        self.assertEqual(list(history), [third, second, first])

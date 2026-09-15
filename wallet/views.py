@@ -142,6 +142,7 @@ class HistoryView(WalletAPIView):
     @extend_schema(
         tags=["wallet"],
         summary="List wallet ledger entries",
+        description="Ordered by created_at descending, then by id for stable pagination.",
         operation_id="wallet_history",
         parameters=[USER_ID_PARAMETER, LIMIT_PARAMETER, OFFSET_PARAMETER],
         responses={
@@ -153,5 +154,7 @@ class HistoryView(WalletAPIView):
     def get(self, request, user_id):
         wallet = _get_wallet(user_id)
         paginator = HistoryPagination()
-        page = paginator.paginate_queryset(wallet.entries.order_by("id"), request, self)
+        page = paginator.paginate_queryset(
+            wallet.entries.order_by("-created_at", "-id"), request, self
+        )
         return paginator.get_paginated_response(LedgerEntrySerializer(page, many=True).data)

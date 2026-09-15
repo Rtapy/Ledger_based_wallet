@@ -113,7 +113,8 @@ LedgerEntry has no duplicate user field, status or updated_at.
 Database constraints enforce nonnegative bounded balances, positive bounded
 amounts, known entry types, credit/debit arithmetic and unique
 `(wallet, idempotency_key)`. UUID keys are required and have no generated default.
-History defaults to ascending ID order, with a `(wallet, id)` index.
+History defaults to descending `created_at` order, with descending `id` as a stable tie-breaker
+and a matching `(wallet, created_at, id)` index.
 
 Django `PROTECT` prevents deleting a user with a wallet or a wallet with entries
 through the ORM. It does not make entries immutable. API balance changes
@@ -229,7 +230,8 @@ Entry responses contain `id`, `wallet_id`, `type`, `amount`, `balance_before`,
 strings with eight fractional digits; timestamps use UTC.
 Balance responses contain `id` (wallet ID), `user_id`, `balance` and `updated_at`.
 
-History is wallet-scoped and ordered by ascending ID. Use `limit` (default 20,
+History is wallet-scoped and ordered by descending `created_at`, then descending `id`
+for deterministic pagination when timestamps are equal. Use `limit` (default 20,
 range 1–100) and `offset` (default 0, nonnegative), with `count`, `next`, `previous`,
 `results`. Invalid pagination returns 400; offsets beyond the end return empty
 results. Unknown or repeated pagination parameters are rejected; signs, whitespace,
@@ -282,7 +284,7 @@ curl "http://127.0.0.1:8000/api/users/$wallet_demo_user_id/wallet/entries/?limit
 ```
 
 On a newly created wallet, expect credit **201**, debit **201**, balance
-`"80.00000000"` and two history entries in ascending ID order. Repeating the
+`"80.00000000"` and two history entries with the newest one first. Repeating the
 first credit command gives **200** and the original entry (historical
 `balance_after="100.00000000"`); current balance stays 80 and history stays at two.
 The other sample user's balance and history remain zero and empty.

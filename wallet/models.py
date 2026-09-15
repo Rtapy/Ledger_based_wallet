@@ -60,9 +60,12 @@ class LedgerEntry(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["id"]
+        ordering = ["-created_at", "-id"]
         indexes = [
-            models.Index(fields=["wallet", "id"], name="ledger_wallet_id_idx"),
+            models.Index(
+                fields=["wallet", "-created_at", "-id"],
+                name="ledger_wallet_created_idx",
+            ),
         ]
         constraints = [
             models.CheckConstraint(

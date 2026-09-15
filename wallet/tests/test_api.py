@@ -1,3 +1,4 @@
+from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -5,6 +6,7 @@ from uuid import UUID, uuid4
 
 from django.contrib.auth import get_user_model
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from wallet.models import LedgerEntry, Wallet
@@ -72,7 +74,7 @@ class WalletAPITests(APITestCase):
         self.assertEqual(set(balance.json()), {"id", "user_id", "balance", "updated_at"})
         history = self.client.get(self._url("history"))
         self.assertEqual(history.status_code, 200)
-        self.assertEqual(history.json()["results"], [credit.json(), debit.json()])
+        self.assertEqual(history.json()["results"], [debit.json(), credit.json()])
 
     def test_entry_response_has_public_fields_fixed_decimals_and_utc_time(self):
         key = uuid4()
@@ -266,6 +268,12 @@ class WalletAPITests(APITestCase):
         for _ in range(5):
             expected.append(self._seed().pk)
             self._seed(user_id=self.other_user.pk)
+        base = timezone.now() - timedelta(days=1)
+        for entry_id, seconds in zip(expected, (4, 0, 2, 2, 3), strict=True):
+            LedgerEntry.objects.filter(pk=entry_id).update(
+                created_at=base + timedelta(seconds=seconds)
+            )
+        expected = [expected[0], expected[4], expected[3], expected[2], expected[1]]
         url = self._url("history") + "?limit=2"
         seen = []
         previous_expected = False
