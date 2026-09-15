@@ -2,13 +2,12 @@
 
 Django/PostgreSQL implementation of the Tabdeal wallet assignment.
 
-**Current stage: models, posting service and tests written; verification pending.**
-PostgreSQL configuration and the API contract are in place. Wallet and
-LedgerEntry now have model definitions and database constraints. Generate and
-review the wallet migration, then run the checks below before committing.
-The API, demo-user command and reconciliation remain implementation targets.
-Service, rollback and PostgreSQL concurrency tests are written but have not been
-executed as part of the service implementation.
+**Current stage: models, posting service and all four API endpoints implemented.**
+Verified on PostgreSQL: 92 tests passed, including 25 API tests and the existing
+model, service, rollback and concurrency tests (2026-09-15).
+The demo-user management command and reconciliation remain implementation targets.
+See [API engineering decisions](docs/api-decisions.md) for the review checklist,
+validation precedence and the limits of user-data isolation without authentication.
 
 ## Local setup and verification
 
@@ -28,21 +27,13 @@ The database runs in Docker; Django runs on the host.
 docker compose up -d --wait --wait-timeout 60 db
 ```
 
-For this model-development stage, generate the migration once and inspect it:
-
-```bash
-venv/bin/python manage.py makemigrations wallet
-git diff -- wallet/models.py wallet/tests/test_models.py README.md
-```
-
-The new migration may be untracked and absent from that diff; open it separately
-and commit it with the models. After the migration is committed, normal setup
-only needs `migrate`, not `makemigrations`.
+The initial wallet migration is committed. Normal setup only needs `migrate`;
+generate additional migrations only when changing the models.
 
 ```bash
 venv/bin/python manage.py check --database default
 venv/bin/python manage.py migrate
-venv/bin/python manage.py test wallet.tests.test_models --verbosity 2 --noinput
+venv/bin/python manage.py test wallet.tests --verbosity 2 --noinput
 venv/bin/python manage.py makemigrations --check --dry-run
 venv/bin/python manage.py migrate --check
 git diff --check
@@ -50,12 +41,10 @@ git diff --check
 
 Tests use a separate database; the database role must be allowed to create it.
 Model tests require PostgreSQL and inspect its constraint diagnostics.
-No commands, migrations or tests were run as part of this implementation.
-
-To verify the posting service, also run:
+To run only the API tests:
 
 ```bash
-venv/bin/python manage.py test wallet.tests.test_services wallet.tests.test_service_transactions --verbosity 2 --noinput
+venv/bin/python manage.py test wallet.tests.test_api --verbosity 2 --noinput
 ```
 
 ## Assumptions
@@ -65,7 +54,7 @@ venv/bin/python manage.py test wallet.tests.test_services wallet.tests.test_serv
   are out of scope.
 - Authentication and ownership checks are omitted for trusted local evaluation.
   This is an applicant decision, not a company-approved exception. Anyone can
-  select a user ID. Planned wallet views use `AllowAny` and
+  select a user ID. Wallet views use `AllowAny` and
   `authentication_classes = []`; Django admin authentication remains separate.
 - Registration is out of scope. A planned `create_demo_user --username NAME`
   command creates a user and zero-balance wallet atomically, prints the user ID
@@ -84,7 +73,7 @@ venv/bin/python manage.py test wallet.tests.test_services wallet.tests.test_serv
 | Wallet | id, user (one-to-one), balance, created_at, updated_at |
 | LedgerEntry | id, wallet, entry_type, amount, balance_before, balance_after, idempotency_key (UUID), created_at |
 
-The internal `entry_type` field will be exposed as `type` in the API.
+The internal `entry_type` field is exposed as `type` in the API.
 LedgerEntry has no duplicate user field, status or updated_at.
 
 Database constraints enforce nonnegative bounded balances, positive bounded
@@ -93,7 +82,7 @@ amounts, known entry types, credit/debit arithmetic and unique
 History defaults to ascending ID order, with a `(wallet, id)` index.
 
 Django `PROTECT` prevents deleting a user with a wallet or a wallet with entries
-through the ORM. It does not make entries immutable. Application writes will
+through the ORM. It does not make entries immutable. API balance changes
 go through the posting service; no ledger edit/delete API or admin registration
 is provided. Direct ORM/SQL edits remain possible for a trusted database
 operator; database immutability triggers are not implemented.
@@ -135,7 +124,8 @@ String parsing, UUID parsing and fixed-width response formatting belong to the A
 Review decisions:
 
 - `post_entry` returns `PostingResult(entry, created)`; it does not return HTTP
-  statuses. Expected rejections use `WalletError.code`; API status mapping is pending.
+  statuses. Expected rejections use `WalletError.code`; the wallet API maps these
+  to the statuses documented below.
 - Invalid input is rejected before locking or replay lookup. For valid input,
   replay/conflict is checked before current funds or the balance ceiling.
 - `user_id` must be a positive integer (not a boolean); invalid values yield
@@ -151,17 +141,19 @@ Review decisions:
   commits. Its lock remains held until that transaction ends; callers must not
   perform slow external work while holding it.
 
-## Planned API contract
+## API contract
 
 | Method | Path | Success |
 | --- | --- | --- |
 | POST | /api/users/{user_id}/wallet/credits/ | 201 created; 200 replay |
 | POST | /api/users/{user_id}/wallet/debits/ | 201 created; 200 replay |
-| GET | /api/users/{user_id}/wallet/ | Current balance |
-| GET | /api/users/{user_id}/wallet/entries/ | Paginated history |
+| GET | /api/users/{user_id}/wallet/ | 200 current balance |
+| GET | /api/users/{user_id}/wallet/entries/ | 200 paginated history |
 
 Wallet endpoints accept and return JSON. Write bodies contain only `amount`,
 for example `{"amount": "10.00000000"}`, and require a UUID `Idempotency-Key` header.
+Missing/extra body fields, duplicate JSON keys and malformed JSON return
+`400 invalid_request`; an invalid amount value returns `400 invalid_amount`.
 
 Amounts must be strings of ASCII digits with an optional fractional part of
 1–8 digits. Reject zero, negatives, signs, whitespace, scientific notation, JSON
@@ -183,30 +175,69 @@ Keys are normalized as UUIDs and scoped to a wallet across both write endpoints:
 Entry responses contain `id`, `wallet_id`, `type`, `amount`, `balance_before`,
 `balance_after`, `idempotency_key` and `created_at`. Decimal response values use
 strings with eight fractional digits; timestamps use UTC.
+Balance responses contain `id` (wallet ID), `user_id`, `balance` and `updated_at`.
 
 History is wallet-scoped and ordered by ascending ID. Use `limit` (default 20,
 range 1–100) and `offset` (default 0, nonnegative), with `count`, `next`, `previous`,
 `results`. Invalid pagination returns 400; offsets beyond the end return empty
-results. Pagination reflects live data rather than a fixed snapshot.
+results. Unknown or repeated pagination parameters are rejected; signs, whitespace,
+fractional values and non-ASCII digits are not accepted. Pagination reflects live
+data rather than a fixed snapshot.
 
 Errors use `{"error": {"code": "...", "message": "..."}}`:
 
 | HTTP status | Codes |
 | --- | --- |
 | 400 | invalid_request, invalid_amount, invalid_idempotency_key, invalid_pagination |
-| 404 | user_not_found, wallet_not_found |
+| 404 | user_not_found, wallet_not_found, not_found (DRF resource/format selection) |
 | 409 | insufficient_funds, balance_limit_exceeded, idempotency_conflict |
 | 405 / 406 / 415 | method_not_allowed / not_acceptable / unsupported_media_type |
 | 500 | internal_error |
 
 Unexpected errors must not expose implementation details.
+This error envelope applies to exceptions inside the four wallet API views;
+unmatched URLs and errors raised by Django middleware are outside this handler.
 
-## Remaining acceptance tests
+## Try the API locally
+
+Create a demo user/wallet once (the command below also tolerates repeat execution):
+
+```bash
+venv/bin/python manage.py shell <<'PY'
+from django.contrib.auth import get_user_model
+from django.db import transaction
+from wallet.models import Wallet
+with transaction.atomic():
+    user, _ = get_user_model().objects.get_or_create(username="wallet-demo")
+    wallet, _ = Wallet.objects.get_or_create(user=user)
+print(user.pk)
+PY
+venv/bin/python manage.py runserver
+```
+
+In another terminal, replace `1` below with the printed user ID. These requests
+change the selected demo wallet. Repeating an unchanged write with its same key
+returns its original entry with 200; use a fresh key for a new operation.
+
+```bash
+wallet_demo_user_id=1
+curl -i -X POST "http://127.0.0.1:8000/api/users/$wallet_demo_user_id/wallet/credits/" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 5f840fed-cf79-4cea-a615-267a9e611951' \
+  -d '{"amount":"100.00000000"}'
+curl -i -X POST "http://127.0.0.1:8000/api/users/$wallet_demo_user_id/wallet/debits/" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 4e1163c8-c3b8-4ea2-9cdb-bc9996a6702c' \
+  -d '{"amount":"20.00000000"}'
+curl "http://127.0.0.1:8000/api/users/$wallet_demo_user_id/wallet/"
+curl "http://127.0.0.1:8000/api/users/$wallet_demo_user_id/wallet/entries/?limit=20&offset=0"
+```
+
+## Verification coverage and remaining work
 
 Model tests cover individual constraints, relationships, UUID scoping, stored
 decimal precision, boundary values and deterministic history ordering.
-Service and transaction tests now cover the posting cases below; execution is
-pending. Reconciliation and API coverage remain future work:
+Service, transaction and API tests passed for the following cases:
 
 - Sequential credits/debits, exact arithmetic, debit to zero and balance ceiling.
 - Rejections and injected failures between writes leave balance and history unchanged.
@@ -214,8 +245,11 @@ pending. Reconciliation and API coverage remain future work:
   may retry successfully after circumstances change.
 - Two simultaneous withdrawals of 80 from 100 yield one success, one rejection,
   balance 20 and one entry. Concurrent identical keys yield one entry.
-- Reconciliation detects balance and history-chain corruption.
 - API validation, errors, complete wallet-scoped history and pagination.
 
 Concurrency and transaction-boundary tests must use PostgreSQL,
 `TransactionTestCase` and separate database connections.
+
+Next: implement reconciliation and its corruption-detection tests, then finish
+the demo-user command and delivery review. Authentication/ownership enforcement
+and database-level ledger immutability are intentionally outside the current scope.

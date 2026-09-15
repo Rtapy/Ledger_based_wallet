@@ -1,8 +1,7 @@
-# wallet/exceptions.py
-# Stub — در کامیت error handling کامل می‌شه.
-
-
 class WalletError(Exception):
-    """Base exception for wallet-related errors."""
+    """Expected rejection; HTTP status mapping belongs to the API."""
 
-    pass
+    def __init__(self, code: str, message: str):
+        self.code = code
+        self.message = message
+        super().__init__(message)

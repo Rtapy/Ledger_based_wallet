@@ -141,5 +141,3 @@ REST_FRAMEWORK = {
 # تا هیچ‌وقت از هم جدا نیفتن.
 LEDGER_DECIMAL_MAX_DIGITS = 20
 LEDGER_DECIMAL_PLACES = 8
-
-from wallet.exceptions import WalletError  # noqa: F401  (referenced early; full handling later)
