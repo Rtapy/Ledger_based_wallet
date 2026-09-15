@@ -2,10 +2,10 @@
 
 Django/PostgreSQL implementation of the Tabdeal wallet assignment.
 
-**Current stage: models, posting service and all four API endpoints implemented.**
-Verified on PostgreSQL: 92 tests passed, including 25 API tests and the existing
-model, service, rollback and concurrency tests (2026-09-15).
-The demo-user management command and reconciliation remain implementation targets.
+**Current stage: models, posting service, four API endpoints and reconciliation implemented.**
+Verified on PostgreSQL: 116 tests passed, including 25 API tests, 24 reconciliation
+tests and the existing model, service, rollback and concurrency tests (2026-09-15).
+The demo-user management command remains an implementation target.
 See [API engineering decisions](docs/api-decisions.md) for the review checklist,
 validation precedence and the limits of user-data isolation without authentication.
 
@@ -92,7 +92,7 @@ from the ledger, enforce a continuous history, provision users' wallets or make
 two writes atomic. Model-test fixtures exercise rows independently of a complete
 wallet history.
 
-## Posting service and planned reconciliation
+## Posting service and reconciliation
 
 Validate input and resolve the existing user/wallet. Inside `transaction.atomic()`:
 
@@ -105,10 +105,28 @@ Validate input and resolve the existing user/wallet. Inside `transaction.atomic(
 Any failure must roll back both writes. Include `updated_at` when using
 `save(update_fields=...)`; `QuerySet.update()` does not update it automatically.
 
-A planned `reconcile_wallet --user-id ID` command takes the same wallet lock,
+The `reconcile_wallet --user-id ID` command takes the same wallet lock,
 compares stored balance with credits minus debits from zero, and validates the
 ordered before/after chain. Discrepancies produce a nonzero exit status;
 reconciliation does not silently repair data.
+
+```bash
+venv/bin/python manage.py reconcile_wallet --user-id 1
+venv/bin/python manage.py test wallet.tests.test_reconciliation --verbosity 2 --noinput
+```
+
+Replace `1` with an existing user ID. The command prints a JSON report containing
+`wallet_id`, `user_id`, `stored_balance`, `ledger_balance`, `entry_count`,
+`balance_matches`, `chain_valid`, `first_invalid_entry_id` and `is_consistent`.
+Balances are strings with eight fractional digits. A consistent wallet exits 0;
+a balance or chain mismatch prints its report then raises CommandError (exit 1).
+Missing users/wallets also fail; the command does not provision or repair them.
+
+Python callers use `wallet.reconciliation.reconcile_wallet(user_id=...)` and
+receive a `ReconciliationResult` with Decimal balances. The comparison and chain
+scan run under one wallet lock. Consistency assumes PostgreSQL READ COMMITTED and
+all writers following the same locking protocol; direct SQL/ORM writes that bypass
+it are outside this concurrency guarantee. See [reconciliation decisions](docs/reconciliation.md).
 
 ### Amount normalization and service decisions
 
@@ -237,7 +255,7 @@ curl "http://127.0.0.1:8000/api/users/$wallet_demo_user_id/wallet/entries/?limit
 
 Model tests cover individual constraints, relationships, UUID scoping, stored
 decimal precision, boundary values and deterministic history ordering.
-Service, transaction and API tests passed for the following cases:
+Service, transaction, API and reconciliation tests passed for the following cases:
 
 - Sequential credits/debits, exact arithmetic, debit to zero and balance ceiling.
 - Rejections and injected failures between writes leave balance and history unchanged.
@@ -246,10 +264,12 @@ Service, transaction and API tests passed for the following cases:
 - Two simultaneous withdrawals of 80 from 100 yield one success, one rejection,
   balance 20 and one entry. Concurrent identical keys yield one entry.
 - API validation, errors, complete wallet-scoped history and pagination.
+- Matching balances, deliberate balance/chain corruption, and unchanged data after auditing.
+- Reconciliation waiting for posting commit/rollback; posting waiting for an audit
+  lock; independent wallets continuing to accept writes.
 
 Concurrency and transaction-boundary tests must use PostgreSQL,
 `TransactionTestCase` and separate database connections.
 
-Next: implement reconciliation and its corruption-detection tests, then finish
-the demo-user command and delivery review. Authentication/ownership enforcement
+Next: finish the demo-user command and delivery review. Authentication/ownership enforcement
 and database-level ledger immutability are intentionally outside the current scope.
