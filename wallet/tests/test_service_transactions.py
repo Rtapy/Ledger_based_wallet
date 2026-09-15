@@ -1,6 +1,6 @@
 """PostgreSQL transaction and concurrency contracts for the posting service.
 
-Fault injection uses the normal LedgerEntry.save() persistence boundary.
+Fault injection uses the normal Wallet.save() and LedgerEntry.save() boundaries.
 The write order is: lock wallet, update balance, insert ledger entry.
 Unexpected persistence failures must propagate after rollback; HTTP translation
 belongs to the API.
@@ -9,7 +9,7 @@ belongs to the API.
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from queue import Queue
-from threading import Barrier
+from threading import Barrier, get_ident
 from time import monotonic, sleep
 from unittest.mock import patch
 from uuid import uuid4
@@ -77,6 +77,123 @@ class _PostingDatabaseHelpers:
 
 
 class PostingTransactionTests(_PostingDatabaseHelpers, TransactionTestCase):
+    def _exercise_wallet_save_failure(self, *, after_update):
+        self._post(amount=Decimal("40"))
+        original_save = Wallet.save
+
+        for entry_type in ("credit", "debit"):
+            with self.subTest(entry_type=entry_type, after_update=after_update):
+                before = self._snapshot()
+                old_balance = Wallet.objects.get(pk=self.wallet.pk).balance
+                expected = old_balance + (Decimal("10") if entry_type == "credit" else Decimal("-10"))
+                key = uuid4()
+
+                def fail_wallet_save(wallet, *args, **kwargs):
+                    self.assertTrue(connection.in_atomic_block)
+                    self.assertEqual(wallet.balance, expected)
+                    if after_update:
+                        original_save(wallet, *args, **kwargs)
+                    self.assertEqual(
+                        Wallet.objects.get(pk=wallet.pk).balance,
+                        expected if after_update else old_balance,
+                    )
+                    raise InjectedPersistenceFailure("Injected at wallet persistence")
+
+                with patch.object(Wallet, "save", autospec=True, side_effect=fail_wallet_save):
+                    with patch.object(LedgerEntry, "save", autospec=True) as ledger_save:
+                        with self.assertRaises(InjectedPersistenceFailure):
+                            self._post(entry_type=entry_type, idempotency_key=key)
+                        ledger_save.assert_not_called()
+
+                self.assertFalse(connection.in_atomic_block)
+                self.assertEqual(self._snapshot(), before)
+                result = self._post(entry_type=entry_type, idempotency_key=key)
+                self.assertIs(result.created, True)
+        self._assert_balanced(Decimal("40"), 3)
+
+    def test_failure_before_wallet_update_leaves_credit_and_debit_unchanged(self):
+        self._exercise_wallet_save_failure(after_update=False)
+
+    def test_failure_after_wallet_update_rolls_back_credit_and_debit(self):
+        self._exercise_wallet_save_failure(after_update=True)
+
+    def test_wallet_database_constraint_failure_rolls_back_and_allows_retry(self):
+        self._post(amount=Decimal("40"))
+        original_save = Wallet.save
+
+        def invalid_wallet_save(wallet, *args, **kwargs):
+            wallet.balance = Decimal("-1")
+            return original_save(wallet, *args, **kwargs)
+
+        for entry_type in ("credit", "debit"):
+            with self.subTest(entry_type=entry_type):
+                before = self._snapshot()
+                key = uuid4()
+                with patch.object(Wallet, "save", autospec=True, side_effect=invalid_wallet_save):
+                    with self.assertRaises(IntegrityError) as raised:
+                        self._post(entry_type=entry_type, idempotency_key=key)
+                self.assertEqual(
+                    raised.exception.__cause__.diag.constraint_name, "wallet_balance_range"
+                )
+                self.assertEqual(self._snapshot(), before)
+                self.assertIs(self._post(entry_type=entry_type, idempotency_key=key).created, True)
+        self._assert_balanced(Decimal("40"), 3)
+
+    def test_database_error_rolls_back_its_savepoint_without_breaking_outer_transaction(self):
+        self._post(amount=Decimal("40"))
+        before = self._snapshot()
+        key = uuid4()
+        original_save = LedgerEntry.save
+
+        def invalid_entry_save(entry, *args, **kwargs):
+            entry.amount = Decimal("0")
+            entry.balance_after = entry.balance_before
+            return original_save(entry, *args, **kwargs)
+
+        with transaction.atomic():
+            with patch.object(LedgerEntry, "save", autospec=True, side_effect=invalid_entry_save):
+                with self.assertRaises(IntegrityError) as raised:
+                    self._post(idempotency_key=key)
+            self.assertEqual(
+                raised.exception.__cause__.diag.constraint_name, "ledger_amount_range"
+            )
+            self.assertFalse(connection.needs_rollback)
+            self.assertEqual(self._snapshot(), before)
+            self.assertIs(self._post(idempotency_key=key).created, True)
+        self._assert_balanced(Decimal("50"), 2)
+
+    def test_independent_reader_cannot_see_uncommitted_writes_or_rolled_back_state(self):
+        self._post(amount=Decimal("40"))
+        before = self._snapshot()
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_backend_pid()")
+            writer_pid = cursor.fetchone()[0]
+
+        def read_from_another_connection():
+            close_old_connections()
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("SET statement_timeout = '10s'")
+                    cursor.execute("SELECT pg_backend_pid()")
+                    reader_pid = cursor.fetchone()[0]
+                return reader_pid, self._snapshot()
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with self.assertRaises(InjectedPersistenceFailure):
+                with transaction.atomic():
+                    self._post()
+                    self._assert_balanced(Decimal("50"), 2)
+                    reader_pid, visible = executor.submit(read_from_another_connection).result(timeout=15)
+                    self.assertNotEqual(reader_pid, writer_pid)
+                    self.assertEqual(visible, before)
+                    raise InjectedPersistenceFailure("Rollback pending writes")
+            reader_pid, visible = executor.submit(read_from_another_connection).result(timeout=15)
+            self.assertNotEqual(reader_pid, writer_pid)
+            self.assertEqual(visible, before)
+        self.assertEqual(self._snapshot(), before)
+
     def test_service_opens_its_own_transaction_from_autocommit(self):
         self.assertTrue(connection.get_autocommit())
         self.assertFalse(connection.in_atomic_block)
@@ -220,13 +337,21 @@ class PostingConcurrencyTests(_PostingDatabaseHelpers, TransactionTestCase):
 
     def _concurrent(self, *requests):
         barrier = Barrier(len(requests))
+        pid_queue = Queue()
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_backend_pid()")
+            main_pid = cursor.fetchone()[0]
         with ThreadPoolExecutor(max_workers=len(requests)) as executor:
             futures = [
-                executor.submit(self._worker, arguments, barrier=barrier)
+                executor.submit(self._worker, arguments, barrier=barrier, pid_queue=pid_queue)
                 for arguments in requests
             ]
             # Unexpected exceptions propagate and fail the test.
-            return [future.result(timeout=20) for future in futures]
+            outcomes = [future.result(timeout=20) for future in futures]
+            worker_pids = [pid_queue.get(timeout=5) for _ in requests]
+        self.assertEqual(len(set(worker_pids)), len(requests), worker_pids)
+        self.assertNotIn(main_pid, worker_pids)
+        return outcomes
 
     def _assert_one_success_one_rejection(self, outcomes, error_code):
         successes = [outcome for outcome in outcomes if "entry_id" in outcome]
@@ -304,6 +429,7 @@ class PostingConcurrencyTests(_PostingDatabaseHelpers, TransactionTestCase):
         self._assert_balanced(Decimal("999999999999.99999999"), 2)
 
     def _wait_until_blocked_by(self, future, worker_pid, owner_pid):
+        self.assertNotEqual(worker_pid, owner_pid)
         deadline = monotonic() + 5
         while monotonic() < deadline:
             if future.done():
@@ -318,6 +444,58 @@ class PostingConcurrencyTests(_PostingDatabaseHelpers, TransactionTestCase):
             # Poll actual PostgreSQL lock state, rather than assume a sleep made a race.
             sleep(0.01)
         self.fail("The posting connection did not wait for the held wallet lock")
+
+    def _retry_while_original_is_uncommitted(self, *, commit):
+        self._post(amount=Decimal("100"))
+        request = {
+            "entry_type": "debit", "amount": Decimal("80"), "idempotency_key": uuid4()
+        }
+        original_save = LedgerEntry.save
+        owner_thread = get_ident()
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_backend_pid()")
+            owner_pid = cursor.fetchone()[0]
+        futures = []
+        pid_queue = Queue()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            def pause_after_insert(entry, *args, **kwargs):
+                # The retry may reach save before the main thread exits the mock.
+                # Inject a failure/pause only into the original posting thread.
+                if get_ident() != owner_thread:
+                    return original_save(entry, *args, **kwargs)
+                original_save(entry, *args, **kwargs)
+                self.assertTrue(connection.in_atomic_block)
+                self.assertEqual(Wallet.objects.get(pk=self.wallet.pk).balance, Decimal("20"))
+                self.assertTrue(LedgerEntry.objects.filter(pk=entry.pk).exists())
+                future = executor.submit(self._worker, request, pid_queue=pid_queue)
+                futures.append(future)
+                self._wait_until_blocked_by(future, pid_queue.get(timeout=5), owner_pid)
+                if not commit:
+                    raise InjectedPersistenceFailure("Original posting rolls back")
+
+            with patch.object(LedgerEntry, "save", autospec=True, side_effect=pause_after_insert):
+                if commit:
+                    original = self._post(**request)
+                    self.assertIs(original.created, True)
+                else:
+                    with self.assertRaises(InjectedPersistenceFailure):
+                        self._post(**request)
+            outcome = futures[0].result(timeout=20)
+
+        self.assertIn("entry_id", outcome, outcome)
+        self.assertIs(outcome["created"], not commit)
+        if commit:
+            self.assertEqual(outcome["entry_id"], original.entry.pk)
+        committed = self.wallet.entries.get(idempotency_key=request["idempotency_key"])
+        self.assertEqual(outcome["entry_id"], committed.pk)
+        self._assert_balanced(Decimal("20"), 2)
+
+    def test_waiting_retry_replays_after_original_commit(self):
+        self._retry_while_original_is_uncommitted(commit=True)
+
+    def test_waiting_retry_posts_once_after_original_rollback(self):
+        self._retry_while_original_is_uncommitted(commit=False)
 
     def test_waiting_debit_uses_the_balance_committed_by_the_lock_owner(self):
         self._post(amount=Decimal("100"))

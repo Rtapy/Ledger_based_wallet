@@ -2,16 +2,23 @@
 
 Django/PostgreSQL implementation of the Tabdeal wallet assignment.
 
-**Current stage: models, posting service, four API endpoints and reconciliation implemented.**
-Verified on PostgreSQL: 116 tests passed, including 25 API tests, 24 reconciliation
+Models, posting service, four API endpoints, reconciliation and demo-user creation
+are implemented. The application runs on the host; PostgreSQL runs in Docker.
+Verified on PostgreSQL: 123 tests passed, including 25 API tests, 24 reconciliation
 tests and the existing model, service, rollback and concurrency tests (2026-09-15).
-The demo-user management command remains an implementation target.
 See [API engineering decisions](docs/api-decisions.md) for the review checklist,
 validation precedence and the limits of user-data isolation without authentication.
+See [transaction execution evidence](docs/transaction-evidence.md) for the verified
+concurrent withdrawal, concurrent retry and persistence-failure scenarios.
 
 ## Local setup and verification
 
-For a fresh checkout:
+Prerequisites: Python 3.12, Docker Engine with Compose v2, and curl for the examples.
+Run commands from the project directory containing `manage.py`. Ports 5432
+(PostgreSQL) and 8000 (Django) must be available, or choose alternatives below.
+SQLite is not supported for this project's financial/concurrency verification.
+
+For a fresh checkout, create a virtual environment and install the pinned dependencies:
 
 ```bash
 python3 -m venv venv
@@ -19,9 +26,16 @@ venv/bin/python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Keep an existing `.env`; do not overwrite it. Set `SECRET_KEY` and
-`POSTGRES_PASSWORD` there. Compose and Django use the same PostgreSQL settings.
-The database runs in Docker; Django runs on the host.
+The `cp` command is for first setup only; keep an existing `.env`.
+Replace the example `SECRET_KEY` and `POSTGRES_PASSWORD` with local values.
+Keep `POSTGRES_HOST=127.0.0.1` and `ALLOWED_HOSTS=localhost,127.0.0.1` for the
+commands below. Django and Compose both read the database settings from `.env`.
+
+If 5432 is occupied, choose a free `POSTGRES_PORT` in `.env`; it configures both
+the Docker port mapping and Django's connection. For a separate fresh database,
+also set a new `COMPOSE_PROJECT_NAME` (e.g. `ledger-wallet-review`) in `.env`;
+Compose then creates a separate container and named volume. This is the method
+used in the [fresh installation verification](docs/delivery-verification.md).
 
 ```bash
 docker compose up -d --wait --wait-timeout 60 db
@@ -36,16 +50,33 @@ venv/bin/python manage.py migrate
 venv/bin/python manage.py test wallet.tests --verbosity 2 --noinput
 venv/bin/python manage.py makemigrations --check --dry-run
 venv/bin/python manage.py migrate --check
+venv/bin/python -m pip check
 git diff --check
 ```
 
 Tests use a separate database; the database role must be allowed to create it.
 Model tests require PostgreSQL and inspect its constraint diagnostics.
+The role created by the PostgreSQL Compose service can create test databases.
+With an independently managed PostgreSQL server, grant the test role `CREATEDB`.
+Tests create/drop a separate test database and do not reset the application database.
 To run only the API tests:
 
 ```bash
 venv/bin/python manage.py test wallet.tests.test_api --verbosity 2 --noinput
 ```
+
+Create two sample users after migrations, and note the two printed IDs:
+
+```bash
+venv/bin/python manage.py create_demo_user --username alice
+venv/bin/python manage.py create_demo_user --username bob
+```
+
+Each command atomically creates one ordinary user with an unusable password and
+a zero-balance wallet. It validates/normalizes the Django username and rejects an
+existing name with exit 1; it never resets an existing wallet. On later runs,
+reuse the original IDs or choose new usernames. Sample ledger entries are created
+through the credit/debit API examples below, so the same posting rules apply.
 
 ## Assumptions
 
@@ -56,7 +87,7 @@ venv/bin/python manage.py test wallet.tests.test_api --verbosity 2 --noinput
   This is an applicant decision, not a company-approved exception. Anyone can
   select a user ID. Wallet views use `AllowAny` and
   `authentication_classes = []`; Django admin authentication remains separate.
-- Registration is out of scope. A planned `create_demo_user --username NAME`
+- Registration is out of scope. The `create_demo_user --username NAME`
   command creates a user and zero-balance wallet atomically, prints the user ID
   and rejects an existing username. APIs do not create missing wallets implicitly.
 - Ledger records represent successful changes only. Rejected requests return
@@ -218,24 +249,17 @@ unmatched URLs and errors raised by Django middleware are outside this handler.
 
 ## Try the API locally
 
-Create a demo user/wallet once (the command below also tolerates repeat execution):
+After creating the sample users above, start Django:
 
 ```bash
-venv/bin/python manage.py shell <<'PY'
-from django.contrib.auth import get_user_model
-from django.db import transaction
-from wallet.models import Wallet
-with transaction.atomic():
-    user, _ = get_user_model().objects.get_or_create(username="wallet-demo")
-    wallet, _ = Wallet.objects.get_or_create(user=user)
-print(user.pk)
-PY
 venv/bin/python manage.py runserver
 ```
 
 In another terminal, replace `1` below with the printed user ID. These requests
 change the selected demo wallet. Repeating an unchanged write with its same key
 returns its original entry with 200; use a fresh key for a new operation.
+If port 8000 is occupied, use `runserver 127.0.0.1:8001 --noreload` and replace
+the port in the curl URLs. The development server is for local evaluation.
 
 ```bash
 wallet_demo_user_id=1
@@ -250,6 +274,35 @@ curl -i -X POST "http://127.0.0.1:8000/api/users/$wallet_demo_user_id/wallet/deb
 curl "http://127.0.0.1:8000/api/users/$wallet_demo_user_id/wallet/"
 curl "http://127.0.0.1:8000/api/users/$wallet_demo_user_id/wallet/entries/?limit=20&offset=0"
 ```
+
+On a newly created wallet, expect credit **201**, debit **201**, balance
+`"80.00000000"` and two history entries in ascending ID order. Repeating the
+first credit command gives **200** and the original entry (historical
+`balance_after="100.00000000"`); current balance stays 80 and history stays at two.
+The other sample user's balance and history remain zero and empty.
+
+Examples of rejected requests (both leave the wallet unchanged):
+
+```bash
+curl -i -X POST "http://127.0.0.1:8000/api/users/$wallet_demo_user_id/wallet/credits/" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 7446d59b-9d2a-44c0-8cb8-b6139d7f0b37' \
+  -d '{"amount":10}'
+curl -i -X POST "http://127.0.0.1:8000/api/users/$wallet_demo_user_id/wallet/debits/" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: a519d5b5-813f-4f93-aa9f-65cc8cfdbd77' \
+  -d '{"amount":"90.00000000"}'
+```
+
+Expect **400 invalid_amount** for the JSON number and **409 insufficient_funds**
+for the withdrawal. Finally, from another terminal in the project directory:
+
+```bash
+venv/bin/python manage.py reconcile_wallet --user-id 1
+```
+
+Use the same user ID. Expect stored and ledger balances `"80.00000000"`,
+`entry_count=2`, `is_consistent=true` and exit 0.
 
 ## Verification coverage and remaining work
 
@@ -267,9 +320,31 @@ Service, transaction, API and reconciliation tests passed for the following case
 - Matching balances, deliberate balance/chain corruption, and unchanged data after auditing.
 - Reconciliation waiting for posting commit/rollback; posting waiting for an audit
   lock; independent wallets continuing to accept writes.
+- Failures before/after Wallet persistence, actual Wallet/Ledger constraint errors,
+  savepoint recovery and invisibility of uncommitted/rolled-back writes to another connection.
+- A retry blocked behind an uncommitted posting replays after commit or posts once
+  after rollback; worker PostgreSQL backend PIDs are explicitly checked for independence.
 
 Concurrency and transaction-boundary tests must use PostgreSQL,
 `TransactionTestCase` and separate database connections.
 
-Next: finish the demo-user command and delivery review. Authentication/ownership enforcement
-and database-level ledger immutability are intentionally outside the current scope.
+## Limitations and local lifecycle
+
+- User IDs select wallets; authentication/ownership enforcement is intentionally
+  absent. This application is for trusted local evaluation, not public deployment.
+- Ledger entries can still be edited/deleted by a database operator. There is no
+  immutability trigger or protection against coordinated history/balance rewriting.
+- Consistent writes/reconciliation assume PostgreSQL READ COMMITTED and every
+  writer acquiring the same Wallet lock. Reconciliation is O(n) and temporarily
+  blocks writes to the inspected wallet; API pagination is a live view, not a snapshot.
+- Only committed operations have ledger records. There is no failed-attempt audit,
+  multi-asset support, transfer, gateway/blockchain integration or user-registration API.
+- HTTP error normalization covers the four wallet views; unmatched routes and
+  Django middleware errors are outside that handler. Load testing, actual network
+  failure and production deployment are outside the verified scope.
+
+Stop Django with Ctrl-C and stop PostgreSQL with `docker compose stop db`.
+Data stays in the named volume. Changing the database username/password in `.env`
+does not reconfigure an already initialized volume; use the original values or
+an explicitly separate Compose project and port for a fresh setup. The routine
+setup and test commands above do not delete existing volumes.
