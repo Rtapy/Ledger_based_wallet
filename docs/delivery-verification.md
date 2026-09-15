@@ -8,7 +8,7 @@ Docker شبکه، container و volume جدید را با project name برابر
 ## محیط اجرا
 
 ```text
-Python=3.14.4 Django=5.2.17 DRF=3.18.1 psycopg=3.3.5
+Python=3.14.4 Django=5.2.17 DRF=3.18.1 drf-spectacular=0.30.0 psycopg=3.3.5
 Docker Compose=2.40.3 PostgreSQL=18.6 (Debian 18.6-1.pgdg13+2)
 isolation=read committed
 ```
@@ -37,8 +37,8 @@ git diff --check
 ```text
 System check identified no issues (0 silenced).
 All migrations applied successfully, including wallet.0001_initial.
-Found 129 test(s).
-Ran 129 tests in 2.952s
+Found 131 test(s).
+Ran 131 tests in 2.833s
 OK
 Destroying test database for alias 'default' ('test_ledger_wallet_fresh')... OK
 No changes detected

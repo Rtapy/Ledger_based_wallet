@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from drf_spectacular.utils import OpenApiParameter, OpenApiTypes, extend_schema
 from rest_framework.permissions import AllowAny
 from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
@@ -10,12 +11,61 @@ from wallet.models import LedgerEntry, Wallet
 from wallet.pagination import HistoryPagination
 from wallet.parsers import WalletJSONParser
 from wallet.serializers import (
+    APIErrorSerializer,
     IdempotencyKeySerializer,
     LedgerEntrySerializer,
     PostingSerializer,
+    WalletHistorySerializer,
     WalletSerializer,
 )
 from wallet.services import post_entry
+
+
+USER_ID_PARAMETER = OpenApiParameter(
+    name="user_id",
+    type=OpenApiTypes.INT,
+    location=OpenApiParameter.PATH,
+    description="Django user ID whose wallet is selected.",
+)
+IDEMPOTENCY_PARAMETER = OpenApiParameter(
+    name="Idempotency-Key",
+    type=OpenApiTypes.UUID,
+    location=OpenApiParameter.HEADER,
+    required=True,
+    description="Caller-supplied UUID. Reuse it only when retrying the same operation.",
+)
+LIMIT_PARAMETER = OpenApiParameter(
+    name="limit",
+    type=OpenApiTypes.INT,
+    location=OpenApiParameter.QUERY,
+    required=False,
+    description="Page size from 1 to 100; defaults to 20.",
+)
+OFFSET_PARAMETER = OpenApiParameter(
+    name="offset",
+    type=OpenApiTypes.INT,
+    location=OpenApiParameter.QUERY,
+    required=False,
+    description="Nonnegative result offset; defaults to 0.",
+)
+
+
+def posting_schema(summary, operation_id):
+    return extend_schema(
+        tags=["wallet"],
+        summary=summary,
+        operation_id=operation_id,
+        parameters=[USER_ID_PARAMETER, IDEMPOTENCY_PARAMETER],
+        request=PostingSerializer,
+        responses={
+            200: LedgerEntrySerializer,
+            201: LedgerEntrySerializer,
+            400: APIErrorSerializer,
+            404: APIErrorSerializer,
+            409: APIErrorSerializer,
+            415: APIErrorSerializer,
+        },
+    )
 
 
 def _get_wallet(user_id):
@@ -63,17 +113,43 @@ class PostingView(WalletAPIView):
 class CreditView(PostingView):
     entry_type = LedgerEntry.EntryType.CREDIT
 
+    @posting_schema("Credit a wallet", "wallet_credit")
+    def post(self, request, user_id):
+        return super().post(request, user_id)
+
 
 class DebitView(PostingView):
     entry_type = LedgerEntry.EntryType.DEBIT
 
+    @posting_schema("Debit a wallet", "wallet_debit")
+    def post(self, request, user_id):
+        return super().post(request, user_id)
+
 
 class BalanceView(WalletAPIView):
+    @extend_schema(
+        tags=["wallet"],
+        summary="Get the current wallet balance",
+        operation_id="wallet_balance",
+        parameters=[USER_ID_PARAMETER],
+        responses={200: WalletSerializer, 404: APIErrorSerializer},
+    )
     def get(self, request, user_id):
         return Response(WalletSerializer(_get_wallet(user_id)).data)
 
 
 class HistoryView(WalletAPIView):
+    @extend_schema(
+        tags=["wallet"],
+        summary="List wallet ledger entries",
+        operation_id="wallet_history",
+        parameters=[USER_ID_PARAMETER, LIMIT_PARAMETER, OFFSET_PARAMETER],
+        responses={
+            200: WalletHistorySerializer,
+            400: APIErrorSerializer,
+            404: APIErrorSerializer,
+        },
+    )
     def get(self, request, user_id):
         wallet = _get_wallet(user_id)
         paginator = HistoryPagination()

@@ -59,8 +59,8 @@ venv/bin/python manage.py test --verbosity 2 --noinput
 ```
 
 ```text
-Found 129 test(s).
-Ran 129 tests in 2.952s
+Found 131 test(s).
+Ran 131 tests in 2.833s
 OK
 ```
 

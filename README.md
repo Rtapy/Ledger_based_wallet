@@ -4,7 +4,7 @@ Django/PostgreSQL implementation of the Tabdeal wallet assignment.
 
 Models, posting service, four API endpoints, reconciliation and demo-user creation
 are implemented. The application runs on the host; PostgreSQL runs in Docker.
-Verified on a fresh PostgreSQL database: 129 tests passed, including 25 API tests,
+Verified on a fresh PostgreSQL database: 131 tests passed, including 25 API tests,
 24 reconciliation tests, 6 demo-command tests and the existing model, service,
 rollback and concurrency tests (2026-09-15).
 See [API engineering decisions](docs/api-decisions.md) for the review checklist,
@@ -61,7 +61,7 @@ Model tests require PostgreSQL and inspect its constraint diagnostics.
 The role created by the PostgreSQL Compose service can create test databases.
 With an independently managed PostgreSQL server, grant the test role `CREATEDB`.
 Tests create/drop a separate test database and do not reset the application database.
-The full command currently discovers 129 tests and should finish with `OK`.
+The full command currently discovers 131 tests and should finish with `OK`.
 To run only the API tests:
 
 ```bash
@@ -257,6 +257,9 @@ After creating the sample users above, start Django:
 ```bash
 venv/bin/python manage.py runserver
 ```
+
+Swagger UI is available at <http://127.0.0.1:8000/api/docs/>. The OpenAPI schema
+is available at <http://127.0.0.1:8000/api/schema/>.
 
 In another terminal, replace `1` below with the printed user ID. These requests
 change the selected demo wallet. Repeating an unchanged write with its same key

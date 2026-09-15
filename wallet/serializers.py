@@ -2,11 +2,17 @@ import re
 from decimal import Decimal, localcontext
 
 from django.conf import settings
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from wallet.models import MAX_BALANCE, LedgerEntry, Wallet
 
 
+@extend_schema_field({
+    "type": "string",
+    "pattern": r"^[0-9]+(?:\.[0-9]{1,8})?$",
+    "example": "10.00000000",
+})
 class AmountField(serializers.Field):
     """Validate the original string before normalizing its decimal scale."""
 
@@ -82,3 +88,19 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
             "balance_after", "idempotency_key", "created_at",
         )
         read_only_fields = fields
+
+
+class WalletHistorySerializer(serializers.Serializer):
+    count = serializers.IntegerField(read_only=True)
+    next = serializers.URLField(read_only=True, allow_null=True)
+    previous = serializers.URLField(read_only=True, allow_null=True)
+    results = LedgerEntrySerializer(many=True, read_only=True)
+
+
+class APIErrorDetailSerializer(serializers.Serializer):
+    code = serializers.CharField(read_only=True)
+    message = serializers.CharField(read_only=True)
+
+
+class APIErrorSerializer(serializers.Serializer):
+    error = APIErrorDetailSerializer(read_only=True)
