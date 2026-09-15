@@ -1,9 +1,9 @@
-"""PostgreSQL transaction and concurrency contracts for the pending service.
+"""PostgreSQL transaction and concurrency contracts for the posting service.
 
 Fault injection uses the normal LedgerEntry.save() persistence boundary.
-The proposed write order is: lock wallet, update balance, insert ledger entry.
+The write order is: lock wallet, update balance, insert ledger entry.
 Unexpected persistence failures must propagate after rollback; HTTP translation
-belongs to the API. No service implementation is supplied with these tests.
+belongs to the API.
 """
 
 from concurrent.futures import ThreadPoolExecutor

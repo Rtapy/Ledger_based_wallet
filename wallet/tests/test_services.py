@@ -1,4 +1,4 @@
-"""Proposed posting-service contract; implementation is intentionally pending.
+"""Posting-service contract.
 
 post_entry(*, user_id, entry_type, amount: Decimal, idempotency_key: UUID)
 returns an object with .entry (persisted LedgerEntry) and .created (bool).
@@ -7,7 +7,6 @@ Domain rejections raise WalletError with a stable .code.
 The API parses JSON/header strings. This service accepts Decimal and UUID
 objects, rejects non-finite amounts and more than eight fractional places
 (including trailing zeros), and compares valid retry amounts numerically.
-Import failure is expected until wallet.services.post_entry is implemented.
 """
 
 from decimal import Decimal

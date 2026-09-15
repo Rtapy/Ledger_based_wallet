@@ -2,12 +2,13 @@
 
 Django/PostgreSQL implementation of the Tabdeal wallet assignment.
 
-**Current stage: models and model tests written; verification pending.**
+**Current stage: models, posting service and tests written; verification pending.**
 PostgreSQL configuration and the API contract are in place. Wallet and
 LedgerEntry now have model definitions and database constraints. Generate and
 review the wallet migration, then run the checks below before committing.
-The posting service, API, demo-user command, reconciliation and concurrency
-tests described below remain implementation targets.
+The API, demo-user command and reconciliation remain implementation targets.
+Service, rollback and PostgreSQL concurrency tests are written but have not been
+executed as part of the service implementation.
 
 ## Local setup and verification
 
@@ -49,7 +50,13 @@ git diff --check
 
 Tests use a separate database; the database role must be allowed to create it.
 Model tests require PostgreSQL and inspect its constraint diagnostics.
-No commands, migrations or tests were run as part of the model implementation.
+No commands, migrations or tests were run as part of this implementation.
+
+To verify the posting service, also run:
+
+```bash
+venv/bin/python manage.py test wallet.tests.test_services wallet.tests.test_service_transactions --verbosity 2 --noinput
+```
 
 ## Assumptions
 
@@ -96,7 +103,7 @@ from the ledger, enforce a continuous history, provision users' wallets or make
 two writes atomic. Model-test fixtures exercise rows independently of a complete
 wallet history.
 
-## Planned posting and reconciliation
+## Posting service and planned reconciliation
 
 Validate input and resolve the existing user/wallet. Inside `transaction.atomic()`:
 
@@ -113,6 +120,36 @@ A planned `reconcile_wallet --user-id ID` command takes the same wallet lock,
 compares stored balance with credits minus debits from zero, and validates the
 ordered before/after chain. Discrepancies produce a nonzero exit status;
 reconciliation does not silently repair data.
+
+### Amount normalization and service decisions
+
+**مسئولیت quantize کردن مقدار به دقیق ۸ رقم اعشار، قبل از فراخوانی سرویس، بر عهده‌ی caller (لایه‌ی API) است**
+
+The API must validate the original input, including its fractional digit count,
+before calling `quantize(Decimal("0.00000001"))`. Quantization must not round
+an invalid input into an accepted amount. The service does not quantize; in
+accordance with its tests, it accepts valid Decimal values with zero to eight
+fractional places and rejects more than eight, including trailing zeros.
+String parsing, UUID parsing and fixed-width response formatting belong to the API.
+
+Review decisions:
+
+- `post_entry` returns `PostingResult(entry, created)`; it does not return HTTP
+  statuses. Expected rejections use `WalletError.code`; API status mapping is pending.
+- Invalid input is rejected before locking or replay lookup. For valid input,
+  replay/conflict is checked before current funds or the balance ceiling.
+- `user_id` must be a positive integer (not a boolean); invalid values yield
+  `invalid_request`. Missing users/wallets yield their respective not-found codes;
+  posting never provisions either resource.
+- The wallet row serializes postings to that wallet. Keys are caller-supplied
+  UUID objects, scoped across credit/debit, and failed writes do not reserve them.
+- Balance arithmetic uses a local Decimal precision of 21 for the current 20-digit
+  fields, allowing an exact sum above the ceiling to be rejected before persistence.
+- Unexpected database errors propagate after rollback; they are not converted
+  into successful replays. The API must handle generic failures without exposing details.
+- A successful call inside an outer transaction is provisional until the caller
+  commits. Its lock remains held until that transaction ends; callers must not
+  perform slow external work while holding it.
 
 ## Planned API contract
 
@@ -168,7 +205,8 @@ Unexpected errors must not expose implementation details.
 
 Model tests cover individual constraints, relationships, UUID scoping, stored
 decimal precision, boundary values and deterministic history ordering.
-After this stage passes, implement and test the posting service first:
+Service and transaction tests now cover the posting cases below; execution is
+pending. Reconciliation and API coverage remain future work:
 
 - Sequential credits/debits, exact arithmetic, debit to zero and balance ceiling.
 - Rejections and injected failures between writes leave balance and history unchanged.
