@@ -55,11 +55,12 @@ OK
 ## نتیجهٔ کل مجموعه
 
 ```bash
-venv/bin/python -B manage.py test wallet.tests --verbosity 1 --noinput
+venv/bin/python manage.py test --verbosity 2 --noinput
 ```
 
 ```text
-Ran 123 tests in 3.511s
+Found 129 test(s).
+Ran 129 tests in 2.952s
 OK
 ```
 
@@ -67,3 +68,4 @@ OK
 موفق بود. زمان‌ها مربوط به همین اجرا هستند و معیار کارایی یا آزمون بار نیستند.
 قطع واقعی شبکه، توقف پردازش و خرابی دیسک در این اجرا آزمایش نشده‌اند؛ شکست‌ها در
 مرز ذخیرهٔ ORM تزریق شده‌اند و خطاهای constraint روی PostgreSQL واقعی رخ داده‌اند.
+اجرای کامل روی دیتابیس تازه در [گزارش تحویل](delivery-verification.md) ثبت شده است.

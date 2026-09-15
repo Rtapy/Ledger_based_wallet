@@ -4,8 +4,9 @@ Django/PostgreSQL implementation of the Tabdeal wallet assignment.
 
 Models, posting service, four API endpoints, reconciliation and demo-user creation
 are implemented. The application runs on the host; PostgreSQL runs in Docker.
-Verified on PostgreSQL: 123 tests passed, including 25 API tests, 24 reconciliation
-tests and the existing model, service, rollback and concurrency tests (2026-09-15).
+Verified on a fresh PostgreSQL database: 129 tests passed, including 25 API tests,
+24 reconciliation tests, 6 demo-command tests and the existing model, service,
+rollback and concurrency tests (2026-09-15).
 See [API engineering decisions](docs/api-decisions.md) for the review checklist,
 validation precedence and the limits of user-data isolation without authentication.
 See [transaction execution evidence](docs/transaction-evidence.md) for the verified
@@ -13,7 +14,8 @@ concurrent withdrawal, concurrent retry and persistence-failure scenarios.
 
 ## Local setup and verification
 
-Prerequisites: Python 3.12, Docker Engine with Compose v2, and curl for the examples.
+Prerequisites: Python 3.12 (Python 3.14.4 is also verified), Docker Engine with
+Compose v2, and curl for the examples.
 Run commands from the project directory containing `manage.py`. Ports 5432
 (PostgreSQL) and 8000 (Django) must be available, or choose alternatives below.
 SQLite is not supported for this project's financial/concurrency verification.
@@ -47,7 +49,7 @@ generate additional migrations only when changing the models.
 ```bash
 venv/bin/python manage.py check --database default
 venv/bin/python manage.py migrate
-venv/bin/python manage.py test wallet.tests --verbosity 2 --noinput
+venv/bin/python manage.py test --verbosity 2 --noinput
 venv/bin/python manage.py makemigrations --check --dry-run
 venv/bin/python manage.py migrate --check
 venv/bin/python -m pip check
@@ -59,6 +61,7 @@ Model tests require PostgreSQL and inspect its constraint diagnostics.
 The role created by the PostgreSQL Compose service can create test databases.
 With an independently managed PostgreSQL server, grant the test role `CREATEDB`.
 Tests create/drop a separate test database and do not reset the application database.
+The full command currently discovers 129 tests and should finish with `OK`.
 To run only the API tests:
 
 ```bash
